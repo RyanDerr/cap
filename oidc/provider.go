@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/hashicorp/cap/oidc/azure"
 	cass "github.com/hashicorp/cap/oidc/clientassertion"
 	"github.com/hashicorp/cap/oidc/internal/strutils"
 	"github.com/hashicorp/go-cleanhttp"
@@ -366,6 +367,12 @@ func (p *Provider) Exchange(ctx context.Context, oidcRequest Request, authorizat
 			return nil, fmt.Errorf("%s: code hash failed verification: %w", op, err)
 		}
 	}
+
+	err = p.fetchAdditionalGroups(ctx, t, claims)
+	if err != nil {
+		return nil, fmt.Errorf("%s: failed to fetch additional groups: %w", op, err)
+	}
+
 	return t, nil
 }
 
@@ -840,6 +847,35 @@ func (p *Provider) DiscoveryInfo(ctx context.Context) (*DiscoveryInfo, error) {
 		return nil, fmt.Errorf("%s: provider issuer %s did not match the issuer %s in discovery info by: %w", op, p.config.Issuer, info.Issuer, ErrInvalidIssuer)
 	}
 	return &info, nil
+}
+
+// fetchAdditionalGroups fetches claims for the given token that require
+// subsequent lookups from the OIDC provider and stores them in token.additionalClaims.
+func (p *Provider) fetchAdditionalGroups(ctx context.Context, token *Tk, claims map[string]interface{}) error {
+	const op = "Provider.fetchAdditionalGroups"
+	switch {
+	case token == nil:
+		return fmt.Errorf("%s: token is nil: %w", op, ErrNilParameter)
+	case token.underlying == nil:
+		return fmt.Errorf("%s: token underlying oauth2 token is nil: %w", op, ErrNilParameter)
+	}
+
+	switch p.config.ProviderType {
+	case ProviderTypeAzure:
+		httpClient, err := p.HTTPClient()
+		if err != nil {
+			return fmt.Errorf("%s: %w", op, err)
+		}
+		agc, err := azure.FetchDistributedAzureGroupClaims(ctx, httpClient, token.underlying, claims)
+		if err != nil {
+			return fmt.Errorf("%s: %w", op, err)
+		}
+		token.applyAdditionalClaims(agc)
+	default:
+		// Currently only Azure is supported for fetching additional groups.
+		// If future providers support additional groups, implement the logic here.
+	}
+	return nil
 }
 
 func unmarshalRespJSON(r *http.Response, body []byte, v interface{}) error {

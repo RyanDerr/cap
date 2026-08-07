@@ -53,6 +53,11 @@ type Tk struct {
 
 	// nowFunc is an optional function that returns the current time
 	nowFunc func() time.Time
+
+	// additionalClaims is an optional set of claims fetched via subsequent
+	// lookups from the OIDC provider after token exchange, such as groups claims
+	// that exceed the token size limit.
+	additionalClaims map[string]interface{}
 }
 
 // ensure that Tk implements the Token interface
@@ -97,6 +102,32 @@ func (t *Tk) RefreshToken() RefreshToken {
 // IDToken implements the IDToken.IDToken() interface function.
 func (t *Tk) IDToken() IDToken { return IDToken(t.idToken) }
 
+// Claims unmarshals the id_token and any additional claims fetched from the
+// provider into v. Additional claims are applied first and id_token claims
+// take precedence on conflict. v must be a non-nil pointer.
+func (t *Tk) Claims(v interface{}) error {
+	const op = "Tk.Claims"
+	if t == nil {
+		return fmt.Errorf("%s: token is nil: %w", op, ErrNilParameter)
+	}
+	if v == nil {
+		return fmt.Errorf("%s: claims interface is nil: %w", op, ErrNilParameter)
+	}
+	if len(t.additionalClaims) > 0 {
+		additional, err := json.Marshal(t.additionalClaims)
+		if err != nil {
+			return fmt.Errorf("%s: failed to marshal additional claims: %w", op, err)
+		}
+		if err := json.Unmarshal(additional, v); err != nil {
+			return fmt.Errorf("%s: failed to unmarshal additional claims: %w", op, err)
+		}
+	}
+	if err := t.idToken.Claims(v); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	return nil
+}
+
 // TokenExpirySkew defines a time skew when checking a Token's expiration.
 const TokenExpirySkew = 10 * time.Second
 
@@ -140,6 +171,21 @@ func (t *Tk) Valid() bool {
 		return false
 	}
 	return !t.IsExpired()
+}
+
+// applyAdditionalClaims adds the claims in src to the token's additional claims.
+// Existing keys not present in src are left unchanged. The map is initialized
+// on first use.
+func (t *Tk) applyAdditionalClaims(src map[string]interface{}) {
+	if len(src) == 0 {
+		return
+	}
+	if t.additionalClaims == nil {
+		t.additionalClaims = make(map[string]interface{}, len(src))
+	}
+	for k, v := range src {
+		t.additionalClaims[k] = v
+	}
 }
 
 // now returns the current time using the optional nowFunc.
