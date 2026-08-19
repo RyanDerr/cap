@@ -1,6 +1,7 @@
 package azure
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -67,22 +68,19 @@ const (
 	// See: https://learn.microsoft.com/en-us/graph/migrate-azure-ad-graph-request-differences
 	azureADGraphChinaHost = "graph.chinacloudapi.cn"
 
-	// graphGroupsPath is the Microsoft Graph v1.0 path for fetching the
-	// transitive group memberships of the authenticated user, selecting only
-	// the group ID to minimize response size. The path is identical across all
-	// Microsoft Graph clouds; only the host differs per environment.
+	// graphMemberGroupsPath is the Microsoft Graph v1.0 path for fetching all
+	// transitive group memberships of the authenticated user in a single POST
+	// request. Returns up to 11,000 group IDs. If that limit is exceeded the
+	// API returns a 400 with Directory_ResultSizeLimitExceeded.
 	//
-	// See: https://learn.microsoft.com/en-us/graph/api/user-list-memberof?view=graph-rest-1.0&tabs=http
-	graphGroupsPath = "/v1.0/me/transitiveMemberOf/microsoft.graph.group?$select=id&$top=999"
+	// See: https://learn.microsoft.com/en-us/graph/api/directoryobject-getmembergroups?view=graph-rest-1.0
+	graphMemberGroupsPath = "/v1.0/me/getMemberGroups"
 )
 
-// graphGroupsResponse is the JSON response shape returned by the Microsoft
-// Graph transitiveMemberOf endpoint.
-type graphGroupsResponse struct {
-	Value []struct {
-		ID string `json:"id"`
-	} `json:"value"`
-	NextLink string `json:"@odata.nextLink"`
+// graphMemberGroupsResponse is the JSON response shape returned by the
+// Microsoft Graph getMemberGroups action.
+type graphMemberGroupsResponse struct {
+	Value []string `json:"value"`
 }
 
 // FetchDistributedAzureGroupClaims fetches group memberships for the
@@ -111,8 +109,7 @@ func FetchDistributedAzureGroupClaims(ctx context.Context, client *http.Client, 
 }
 
 // fetchGroupIDs fetches all transitive group IDs for the authenticated user
-// from the Microsoft Graph API at the given groupsURL, following pagination
-// until exhausted.
+// from the Microsoft Graph getMemberGroups API at the given url.
 func fetchGroupIDs(ctx context.Context, client *http.Client, token *oauth2.Token, groupsURL string) ([]string, error) {
 	const op = "fetchGroupIDs"
 	switch {
@@ -124,37 +121,35 @@ func fetchGroupIDs(ctx context.Context, client *http.Client, token *oauth2.Token
 		return nil, fmt.Errorf("%s: token access token is empty: %w", op, ErrInvalidParameter)
 	}
 
-	var ids []string
-	for groupsURL != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, groupsURL, nil)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", op, err)
-		}
-		req.Header.Set("Authorization", "Bearer "+token.AccessToken)
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", op, err)
-		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("%s: unable to read response body: %w", op, err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("%s: %s: %s", op, resp.Status, body)
-		}
-		var page graphGroupsResponse
-		if err := json.Unmarshal(body, &page); err != nil {
-			return nil, fmt.Errorf("%s: failed to unmarshal groups response: %w", op, err)
-		}
-		for _, g := range page.Value {
-			if g.ID != "" {
-				ids = append(ids, g.ID)
-			}
-		}
-		groupsURL = page.NextLink
+	body, err := json.Marshal(map[string]bool{"securityEnabledOnly": false})
+	if err != nil {
+		return nil, fmt.Errorf("%s: failed to marshal request body: %w", op, err)
 	}
-	return ids, nil
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, groupsURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	respBody, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("%s: unable to read response body: %w", op, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: %s: %s", op, resp.Status, respBody)
+	}
+
+	var result graphMemberGroupsResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("%s: failed to unmarshal groups response: %w", op, err)
+	}
+	return result.Value, nil
 }
 
 // parseGroupsOverageHost parses the Azure groups overage distributed claim
@@ -200,20 +195,20 @@ func parseGroupsOverageHost(claims map[string]interface{}) (string, bool) {
 	return u.Host, true
 }
 
-// graphGroupsURLForHost returns the Microsoft Graph transitiveMemberOf URL for
+// graphGroupsURLForHost returns the Microsoft Graph getMemberGroups URL for
 // the given host. Deprecated AAD Graph hosts are mapped to their modern
 // Microsoft Graph equivalents. The commercial Microsoft Graph URL is returned
 // for any unrecognized host.
 func graphGroupsURLForHost(host string) string {
 	switch host {
 	case microsoftGraphUSHost, azureADGraphUSHost:
-		return "https://" + microsoftGraphUSHost + graphGroupsPath
+		return "https://" + microsoftGraphUSHost + graphMemberGroupsPath
 	case microsoftGraphDoDHost:
-		return "https://" + microsoftGraphDoDHost + graphGroupsPath
+		return "https://" + microsoftGraphDoDHost + graphMemberGroupsPath
 	case microsoftGraphChinaHost, azureADGraphChinaHost:
-		return "https://" + microsoftGraphChinaHost + graphGroupsPath
+		return "https://" + microsoftGraphChinaHost + graphMemberGroupsPath
 	default:
-		return "https://" + microsoftGraphHost + graphGroupsPath
+		return "https://" + microsoftGraphHost + graphMemberGroupsPath
 	}
 }
 
