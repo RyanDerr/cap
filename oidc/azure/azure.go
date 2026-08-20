@@ -74,7 +74,7 @@ const (
 	// API returns a 400 with Directory_ResultSizeLimitExceeded.
 	//
 	// See: https://learn.microsoft.com/en-us/graph/api/directoryobject-getmembergroups?view=graph-rest-1.0
-	graphMemberGroupsPath = "/v1.0/me/getMemberGroups"
+	graphMemberGroupsPath = "/v1.0/me/getMemberObjects"
 )
 
 // graphMemberGroupsResponse is the JSON response shape returned by the
